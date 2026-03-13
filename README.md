@@ -50,9 +50,10 @@ ollama pull moondream
 
 ```bash
 source .env
-docker run --rm eclipse-mosquitto:2.0 \
-  mosquitto_passwd -c -b /dev/stdout "$MQTT_USER" "$MQTT_PASSWORD" \
-  > ./mosquitto/passwd
+docker run --rm \
+  -v "$(pwd)/mosquitto:/mosquitto/config" \
+  eclipse-mosquitto:2.0 \
+  mosquitto_passwd -c -b /mosquitto/config/passwd "$MQTT_USER" "$MQTT_PASSWORD"
 chmod 600 ./mosquitto/passwd
 ```
 
