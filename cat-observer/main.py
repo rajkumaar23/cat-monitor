@@ -50,28 +50,26 @@ last_frames: dict[str, bytes] = {}
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
-CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS observations (
-    id           SERIAL PRIMARY KEY,
-    timestamp    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    camera_name  TEXT NOT NULL,
-    description  TEXT,
-    has_cat      BOOLEAN DEFAULT FALSE,
-    cat_count    INT,
-    activity_tag TEXT,
-    location_tag TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_obs_ts  ON observations (timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_obs_cam ON observations (camera_name);
-CREATE INDEX IF NOT EXISTS idx_obs_cat ON observations (has_cat);
-
--- Migrate old schema (event_id-based) to new schema if needed
-ALTER TABLE observations ADD COLUMN IF NOT EXISTS has_cat      BOOLEAN DEFAULT FALSE;
-ALTER TABLE observations ADD COLUMN IF NOT EXISTS cat_count    INT;
-ALTER TABLE observations ADD COLUMN IF NOT EXISTS activity_tag TEXT;
-ALTER TABLE observations ADD COLUMN IF NOT EXISTS location_tag TEXT;
-ALTER TABLE observations ADD COLUMN IF NOT EXISTS description  TEXT;
-"""
+MIGRATIONS = [
+    """CREATE TABLE IF NOT EXISTS observations (
+        id           SERIAL PRIMARY KEY,
+        timestamp    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        camera_name  TEXT NOT NULL,
+        description  TEXT,
+        has_cat      BOOLEAN DEFAULT FALSE,
+        cat_count    INT,
+        activity_tag TEXT,
+        location_tag TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_obs_ts  ON observations (timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_obs_cam ON observations (camera_name)",
+    "CREATE INDEX IF NOT EXISTS idx_obs_cat ON observations (has_cat)",
+    "ALTER TABLE observations ADD COLUMN IF NOT EXISTS description  TEXT",
+    "ALTER TABLE observations ADD COLUMN IF NOT EXISTS has_cat      BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE observations ADD COLUMN IF NOT EXISTS cat_count    INT",
+    "ALTER TABLE observations ADD COLUMN IF NOT EXISTS activity_tag TEXT",
+    "ALTER TABLE observations ADD COLUMN IF NOT EXISTS location_tag TEXT",
+]
 
 
 async def get_db() -> asyncpg.Pool:
@@ -79,7 +77,8 @@ async def get_db() -> asyncpg.Pool:
     if db_pool is None:
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
         async with db_pool.acquire() as conn:
-            await conn.execute(CREATE_TABLE_SQL)
+            for stmt in MIGRATIONS:
+                await conn.execute(stmt)
         log.info("Database pool ready")
     return db_pool
 
@@ -312,9 +311,9 @@ async def summary(
     date_str: Optional[str] = Query(None, alias="date"),
     camera: Optional[str] = None,
 ):
-    target = date_str or date.today().isoformat()
+    target_date = date.fromisoformat(date_str) if date_str else date.today()
     pool = await get_db()
-    args = [target]
+    args = [target_date]
     cam_filter = ""
     if camera:
         cam_filter = " AND camera_name = $2"
@@ -339,7 +338,7 @@ async def summary(
             ORDER BY timestamp ASC""", *args)
 
     return {
-        "date": target,
+        "date": target_date.isoformat(),
         "camera": camera,
         "total_observations": total,
         "cat_observations": cat_total,
