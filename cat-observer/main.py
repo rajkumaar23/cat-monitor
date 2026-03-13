@@ -18,6 +18,7 @@ import asyncpg
 import httpx
 import paho.mqtt.client as mqtt
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -271,6 +272,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="cat-observer", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
