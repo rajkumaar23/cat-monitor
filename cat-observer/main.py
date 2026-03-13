@@ -64,6 +64,13 @@ CREATE TABLE IF NOT EXISTS observations (
 CREATE INDEX IF NOT EXISTS idx_obs_ts  ON observations (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_obs_cam ON observations (camera_name);
 CREATE INDEX IF NOT EXISTS idx_obs_cat ON observations (has_cat);
+
+-- Migrate old schema (event_id-based) to new schema if needed
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS has_cat      BOOLEAN DEFAULT FALSE;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS cat_count    INT;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS activity_tag TEXT;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS location_tag TEXT;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS description  TEXT;
 """
 
 

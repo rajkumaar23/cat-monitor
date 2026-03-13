@@ -24,18 +24,16 @@ services:
       CAM2_PASS: ${CAM2_PASS}
 
   nano-llm:
-    image: ${NANO_LLM_IMAGE:-dustynv/nano_llm:r36.2.0}
+    build:
+      context: ./nano-llm
+      args:
+        NANO_LLM_IMAGE: ${NANO_LLM_IMAGE:-dustynv/nano_llm:r36.2.0}
     runtime: nvidia
     restart: unless-stopped
     ports:
       - "8085:8085"
     volumes:
-      - ./nano-llm/server.py:/app/server.py
       - nano-llm-models:/data/models
-    working_dir: /app
-    command: >
-      bash -c "pip3 install --quiet --no-cache-dir 'fastapi>=0.115' 'uvicorn[standard]' pillow &&
-               python3 /app/server.py"
     environment:
       VILA_MODEL: ${VILA_MODEL:-Efficient-Large-Model/VILA1.5-3b}
       MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-96}
