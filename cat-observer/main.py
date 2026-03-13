@@ -226,8 +226,9 @@ def make_mqtt_client(loop: asyncio.AbstractEventLoop) -> mqtt.Client:
                 evt_type = payload.get("type")
                 after = payload.get("after", {})
                 label = after.get("label", "")
-                score = after.get("score") or after.get("top_score") or 0.0
-                if evt_type == "new" and label in TRACKED_LABELS and score >= MIN_SCORE:
+                score = after.get("top_score") or after.get("score") or 0.0
+                log.info("MQTT event type=%s label=%s score=%.2f", evt_type, label, score)
+                if evt_type in ("new", "end") and label in TRACKED_LABELS and score >= MIN_SCORE:
                     event_data = {**after, "score": score}
                     asyncio.run_coroutine_threadsafe(event_queue.put(event_data), loop)
             elif "/availability" in topic:
