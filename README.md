@@ -54,8 +54,7 @@ docker run --rm \
   -v "$(pwd)/mosquitto:/mosquitto/config" \
   eclipse-mosquitto:2.0 \
   sh -c "mosquitto_passwd -c -b /mosquitto/config/passwd \"$MQTT_USER\" \"$MQTT_PASSWORD\" \
-         && chown root:root /mosquitto/config/passwd \
-         && chmod 600 /mosquitto/config/passwd"
+         && chmod 644 /mosquitto/config/passwd"
 ```
 
 ### 4. Confirm NVIDIA container toolkit
