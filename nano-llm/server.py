@@ -42,7 +42,7 @@ def _load_model():
     global model
     from nano_llm import NanoLLM
     log.info("Loading %s ...", VILA_MODEL)
-    model = NanoLLM.from_pretrained(VILA_MODEL, api="mlc", quantization="q4f16_ft")
+    model = NanoLLM.from_pretrained(VILA_MODEL, api="mlc", quantization="q4f16_1")
     log.info("Model ready.")
 
 
