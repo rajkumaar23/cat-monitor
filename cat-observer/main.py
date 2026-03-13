@@ -36,13 +36,10 @@ logging.basicConfig(
 log = logging.getLogger("cat-observer")
 
 PROMPT = (
-    "You are a real-time home security camera observer. "
-    "Describe exactly what you see happening RIGHT NOW in this frame. "
-    "Be specific and observational — note movement, positions, actions, and any changes. "
-    "Focus on cats first: how many, where they are, and what they are actively doing. "
-    "Also note people, objects, or anything unusual. "
-    "Do NOT give generic descriptions — describe the specific scene in this exact moment. "
-    "Keep it to 2 sentences max."
+    "Describe this security camera image in 1-2 sentences. "
+    "State what subjects are present (cats, people, or nothing), "
+    "what they are doing, and where they are in the room. "
+    "Be direct and factual. Do not ask questions or list topics."
 )
 
 # ─── State ────────────────────────────────────────────────────────────────────
