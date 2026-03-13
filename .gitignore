@@ -1,0 +1,11 @@
+.env
+mosquitto/passwd
+mosquitto/data/
+mosquitto/log/
+frigate/media/
+postgres-data/
+ollama-models/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

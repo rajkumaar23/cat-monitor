@@ -1,0 +1,109 @@
+mqtt:
+  enabled: true
+  host: mosquitto
+  port: 1883
+  user: "{FRIGATE_MQTT_USER}"
+  password: "{FRIGATE_MQTT_PASSWORD}"
+  topic_prefix: frigate
+
+database:
+  path: /media/frigate/frigate.db
+
+detectors:
+  tensorrt:
+    type: tensorrt
+    device: 0
+
+model:
+  path: /config/model_cache/tensorrt/yolov7-tiny-416.trt
+  input_tensor: nchw
+  input_pixel_format: rgb
+  width: 416
+  height: 416
+
+cameras:
+  living_room:
+    ffmpeg:
+      inputs:
+        - path: rtsp://host.docker.internal:8554/living_room
+          roles:
+            - detect
+            - record
+    detect:
+      enabled: true
+      width: 1280
+      height: 720
+      fps: 5
+    objects:
+      track:
+        - cat
+        - person
+      filters:
+        cat:
+          min_score: 0.5
+          threshold: 0.7
+        person:
+          min_score: 0.5
+          threshold: 0.7
+    snapshots:
+      enabled: true
+      clean_copy: true
+      timestamp: false
+      bounding_box: false
+      crop: false
+      quality: 85
+      retain:
+        default: 7
+    record:
+      enabled: false
+    motion:
+      threshold: 25
+      contour_area: 100
+
+  bedroom:
+    ffmpeg:
+      inputs:
+        - path: rtsp://host.docker.internal:8554/bedroom
+          roles:
+            - detect
+            - record
+    detect:
+      enabled: true
+      width: 1280
+      height: 720
+      fps: 5
+    objects:
+      track:
+        - cat
+        - person
+      filters:
+        cat:
+          min_score: 0.5
+          threshold: 0.7
+        person:
+          min_score: 0.5
+          threshold: 0.7
+    snapshots:
+      enabled: true
+      clean_copy: true
+      timestamp: false
+      bounding_box: false
+      crop: false
+      quality: 85
+      retain:
+        default: 7
+    record:
+      enabled: false
+    motion:
+      threshold: 25
+      contour_area: 100
+
+snapshots:
+  retain:
+    default: 7
+
+logger:
+  default: warning
+  logs:
+    frigate.detectors: info
+    frigate.mqtt: info

@@ -1,0 +1,153 @@
+services:
+
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./go2rtc:/config
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache gettext 2>/dev/null || true
+        envsubst < /config/config.yaml.tpl > /tmp/go2rtc.yaml
+        go2rtc -config /tmp/go2rtc.yaml
+    environment:
+      CAM1_IP: ${CAM1_IP}
+      CAM1_PORT: ${CAM1_PORT}
+      CAM1_USER: ${CAM1_USER}
+      CAM1_PASS: ${CAM1_PASS}
+      CAM2_IP: ${CAM2_IP}
+      CAM2_PORT: ${CAM2_PORT}
+      CAM2_USER: ${CAM2_USER}
+      CAM2_PASS: ${CAM2_PASS}
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable
+    restart: unless-stopped
+    privileged: true
+    shm_size: "256mb"
+    runtime: nvidia
+    ports:
+      - "5000:5000"
+      - "8554:8554"
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    volumes:
+      - ./frigate/config.yml:/config/config.yml:ro
+      - frigate-media:/media/frigate
+      - frigate-model-cache:/config/model_cache
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      FRIGATE_RTSP_PASSWORD: ${FRIGATE_RTSP_PASSWORD}
+      FRIGATE_MQTT_USER: ${FRIGATE_MQTT_USER}
+      FRIGATE_MQTT_PASSWORD: ${FRIGATE_MQTT_PASSWORD}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - mosquitto
+      - go2rtc
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    runtime: nvidia
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+
+  ollama-init:
+    image: curlimages/curl:latest
+    restart: "no"
+    depends_on:
+      - ollama
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "Waiting for Ollama to be ready..."
+        until curl -sf http://ollama:11434/api/tags > /dev/null; do sleep 5; done
+        echo "Pulling moondream..."
+        curl -sf -X POST http://ollama:11434/api/pull -d '{"name":"moondream"}' | tail -1
+        echo "Pulling ${OLLAMA_CHAT_MODEL}..."
+        curl -sf -X POST http://ollama:11434/api/pull -d "{\"name\":\"${OLLAMA_CHAT_MODEL}\"}" | tail -1
+        echo "Models ready."
+    environment:
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL}
+
+  cat-observer:
+    build: ./cat-observer
+    restart: unless-stopped
+    ports:
+      - "${OBSERVER_PORT:-8088}:8088"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USER: ${MQTT_USER}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+      FRIGATE_URL: http://frigate:5000
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-moondream}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      frigate:
+        condition: service_started
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - openwebui-data:/app/backend/data
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_SECRET_KEY: ${OPENWEBUI_SECRET_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - ollama
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
+  frigate-media:
+  frigate-model-cache:
+  postgres-data:
+  ollama-models:
+  openwebui-data:
