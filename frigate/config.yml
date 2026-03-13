@@ -10,10 +10,12 @@ database:
   path: /media/frigate/frigate.db
 
 detectors:
-  tensorrt:
-    type: tensorrt
-    device: 0
+  cpu1:
+    type: cpu
+    num_threads: 3
 
+ffmpeg:
+  hwaccel_args: preset-jetson-h264
 
 cameras:
   living_room:
