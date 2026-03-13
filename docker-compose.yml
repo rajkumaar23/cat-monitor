@@ -75,36 +75,6 @@ services:
       timeout: 5s
       retries: 5
 
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    runtime: nvidia
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-models:/root/.ollama
-    environment:
-      NVIDIA_VISIBLE_DEVICES: all
-
-  ollama-init:
-    image: curlimages/curl:latest
-    restart: "no"
-    depends_on:
-      - ollama
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        echo "Waiting for Ollama to be ready..."
-        until curl -sf http://ollama:11434/api/tags > /dev/null; do sleep 5; done
-        echo "Pulling moondream..."
-        curl -sf -X POST http://ollama:11434/api/pull -d '{"name":"moondream"}' | tail -1
-        echo "Pulling ${OLLAMA_CHAT_MODEL}..."
-        curl -sf -X POST http://ollama:11434/api/pull -d "{\"name\":\"${OLLAMA_CHAT_MODEL}\"}" | tail -1
-        echo "Models ready."
-    environment:
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL}
-
   cat-observer:
     image: ghcr.io/rajkumaar23/cat-monitor:latest
     restart: unless-stopped
@@ -117,31 +87,14 @@ services:
       MQTT_USER: ${MQTT_USER}
       MQTT_PASSWORD: ${MQTT_PASSWORD}
       FRIGATE_URL: http://frigate:5000
-      OLLAMA_URL: http://ollama:11434
+      OLLAMA_URL: ${OLLAMA_URL}
       OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-moondream}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
-      ollama:
-        condition: service_started
       frigate:
         condition: service_started
-
-  openwebui:
-    image: ghcr.io/open-webui/open-webui:main
-    restart: unless-stopped
-    ports:
-      - "3000:8080"
-    volumes:
-      - openwebui-data:/app/backend/data
-    environment:
-      OLLAMA_BASE_URL: http://ollama:11434
-      WEBUI_SECRET_KEY: ${OPENWEBUI_SECRET_KEY}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      - ollama
 
 volumes:
   mosquitto-data:
@@ -149,5 +102,3 @@ volumes:
   frigate-media:
   frigate-model-cache:
   postgres-data:
-  ollama-models:
-  openwebui-data:

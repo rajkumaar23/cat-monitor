@@ -6,14 +6,18 @@ Self-hosted cat behavior monitoring system using Kasa EC70 cameras, Frigate NVR,
 Kasa EC70 (cam1)  ──┐
                      ├──► go2rtc ──► Frigate ──► MQTT ──► cat-observer
 Kasa EC70 (cam2)  ──┘                    │                     │
-                                   snapshot API          Ollama/Moondream2
+                                   snapshot API      Ollama/Moondream2 (external)
                                                                │
                                                          PostgreSQL
                                                                │
-                                                      OpenWebUI + qwen2.5:3b
+                                                  OpenWebUI (external) + cat tool
 ```
 
 **Hardware:** Jetson Orin Nano 8GB (TensorRT detection). CPU fallback available.
+
+**External dependencies (not managed by this stack):**
+- Ollama — already running on the Jetson
+- OpenWebUI — already running on a separate host
 
 ---
 
@@ -34,12 +38,15 @@ Edit `.env` and fill in all values:
   ```bash
   echo -n 'yourpassword' | base64
   ```
-- `OPENWEBUI_SECRET_KEY` — generate a random key:
-  ```bash
-  openssl rand -hex 32
-  ```
+- `OLLAMA_URL` — point to your existing Ollama instance, e.g. `http://192.168.1.x:11434`
 
-### 2. Generate Mosquitto password file (one-time)
+### 2. Pull moondream into your existing Ollama (if not already)
+
+```bash
+ollama pull moondream
+```
+
+### 3. Generate Mosquitto password file (one-time)
 
 ```bash
 source .env
@@ -49,21 +56,20 @@ docker run --rm eclipse-mosquitto:2.0 \
 chmod 600 ./mosquitto/passwd
 ```
 
-### 3. Confirm NVIDIA container toolkit
+### 4. Confirm NVIDIA container toolkit
 
 ```bash
-# On Jetson:
 sudo apt show nvidia-jetpack
 nvidia-container-cli info
 ```
 
-### 4. Start everything
+### 5. Start the stack
 
 ```bash
 docker compose up -d
 ```
 
-### 5. Wait for TensorRT compilation (~10 min, first run only)
+### 6. Wait for TensorRT compilation (~10 min, first run only)
 
 ```bash
 docker logs frigate -f
@@ -72,21 +78,13 @@ docker logs frigate -f
 
 The `frigate-model-cache` volume persists the compiled TRT model so subsequent restarts are fast.
 
-### 6. Ollama model pull (automatic)
+### 7. Add the cat tool to OpenWebUI
 
-The `ollama-init` service automatically pulls `moondream` and `qwen2.5:3b` on first start.
-Monitor progress:
-
-```bash
-docker logs ollama-init -f
-```
-
-### 7. Upload the OpenWebUI tool
-
-1. Open OpenWebUI at `http://<jetson-ip>:3000`
+1. Open your existing OpenWebUI instance
 2. Go to **Settings → Tools → Add Tool**
 3. Paste the contents of `openwebui-tools/cat_query_tool.py`
-4. Save
+4. Update `CAT_OBSERVER_URL` at the top of the file to point to the Jetson IP, e.g. `http://192.168.1.x:8088`
+5. Save
 
 In chat, click the **tools icon** to enable the tool, then ask:
 > "What have my cats been doing today?"
@@ -97,10 +95,8 @@ In chat, click the **tools icon** to enable the tool, then ask:
 
 | Service | Port | URL |
 |---|---|---|
-| Frigate UI | 5000 | `http://<ip>:5000` |
-| OpenWebUI | 3000 | `http://<ip>:3000` |
-| cat-observer API | 8088 | `http://<ip>:8088` |
-| Ollama API | 11434 | `http://<ip>:11434` |
+| Frigate UI | 5000 | `http://<jetson-ip>:5000` |
+| cat-observer API | 8088 | `http://<jetson-ip>:8088` |
 | MQTT | 1883 | — |
 
 ---
@@ -127,7 +123,7 @@ Expected health response:
 
 ## CPU fallback (non-Jetson)
 
-If you don't have a Jetson, remove `runtime: nvidia` from the `frigate` and `ollama` services in `docker-compose.yml`, and change the detector in `frigate/config.yml`:
+Remove `runtime: nvidia` from the `frigate` service in `docker-compose.yml`, and change the detector in `frigate/config.yml`:
 
 ```yaml
 detectors:
