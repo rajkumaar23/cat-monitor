@@ -34,7 +34,7 @@ Kasa EC70 cameras
 
 ## Setup
 
-### 1. Clone and configure
+### 1. Clone and configure (both hosts)
 
 ```bash
 git clone <repo-url> cat-monitor
@@ -44,10 +44,11 @@ cp .env.example .env
 
 Edit `.env`:
 - `CAM1_USER` / `CAM2_USER` — URL-percent-encode your email (`@` → `%40`)
-- `CAM1_PASS` / `CAM2_PASS` — base64-encode your password: `echo -n 'pass' | base64`
+- `CAM1_PASS` / `CAM2_PASS` — base64-encode: `echo -n 'pass' | base64`
+- `JETSON_IP` — IP of the Jetson on your LAN
 - `NANO_LLM_IMAGE` — match your JetPack version (see below)
 
-### 2. Check your JetPack version
+### 2. Check JetPack version (on Jetson)
 
 ```bash
 sudo apt show nvidia-jetpack 2>/dev/null | grep Version
@@ -58,13 +59,14 @@ sudo apt show nvidia-jetpack 2>/dev/null | grep Version
 | 6.x | r36.x | `dustynv/nano_llm:r36.2.0` |
 | 5.1 | r35.x | `dustynv/nano_llm:r35.4.1` |
 
-### 3. Start the stack
+### 3. Start nano-llm on the Jetson
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.jetson.yml build
+docker compose -f docker-compose.jetson.yml up -d
 ```
 
-### 4. Wait for VILA to load (~3–5 min first run, model downloads automatically)
+Wait for VILA to load (~3–5 min first run, model downloads automatically):
 
 ```bash
 docker logs cat-monitor-nano-llm-1 -f
@@ -73,29 +75,39 @@ docker logs cat-monitor-nano-llm-1 -f
 
 The model is cached in the `nano-llm-models` volume — subsequent starts are fast.
 
+### 4. Start everything else on the main host
+
+```bash
+docker compose up -d
+```
+
 ### 5. Verify
 
 ```bash
-curl http://<jetson-ip>:8088/health
-curl http://<jetson-ip>:8088/observations
+# nano-llm health (from anywhere)
+curl http://<jetson-ip>:8085/health
+
+# cat-observer (on main host)
+curl http://<main-host-ip>:8088/health
+curl http://<main-host-ip>:8088/observations
 ```
 
 ### 6. Add the OpenWebUI tool
 
 1. Open your OpenWebUI instance
 2. **Settings → Tools → Add Tool** → paste `openwebui-tools/cat_query_tool.py`
-3. Update `CAT_OBSERVER_URL` at the top to `http://<jetson-ip>:8088`
+3. Update `CAT_OBSERVER_URL` at the top to `http://<main-host-ip>:8088`
 4. Enable the tool in chat and ask: *"What have my cats been doing today?"*
 
 ---
 
 ## Services & ports
 
-| Service | Port | Purpose |
-|---|---|---|
-| go2rtc UI + API | 1984 | Live stream viewer, snapshot API |
-| nano-llm API | 8085 | VILA1.5-3b HTTP inference |
-| cat-observer API | 8088 | Observations REST API |
+| Host | Service | Port | Purpose |
+|---|---|---|---|
+| Main | go2rtc UI + API | 1984 | Live stream viewer, snapshot API |
+| Main | cat-observer API | 8088 | Observations REST API |
+| Jetson | nano-llm API | 8085 | VILA1.5-3b HTTP inference |
 
 ---
 

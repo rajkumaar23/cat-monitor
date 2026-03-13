@@ -1,0 +1,25 @@
+# Jetson only: nano-llm (VILA1.5-3b)
+# Run with: docker compose -f docker-compose.jetson.yml up -d
+# Build with: docker compose -f docker-compose.jetson.yml build
+
+services:
+
+  nano-llm:
+    build:
+      context: ./nano-llm
+      args:
+        NANO_LLM_IMAGE: ${NANO_LLM_IMAGE:-dustynv/nano_llm:r36.2.0}
+    runtime: nvidia
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    volumes:
+      - nano-llm-models:/data/models
+    environment:
+      VILA_MODEL: ${VILA_MODEL:-Efficient-Large-Model/VILA1.5-3b}
+      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-96}
+      HF_HOME: /data/models
+      TRANSFORMERS_CACHE: /data/models
+
+volumes:
+  nano-llm-models:

@@ -1,3 +1,7 @@
+# Main host: go2rtc + cat-observer + postgres
+# Run with: docker compose up -d
+# Requires JETSON_IP in .env pointing to the Jetson running docker-compose.jetson.yml
+
 services:
 
   go2rtc:
@@ -22,23 +26,6 @@ services:
       CAM2_PORT: ${CAM2_PORT}
       CAM2_USER: ${CAM2_USER}
       CAM2_PASS: ${CAM2_PASS}
-
-  nano-llm:
-    build:
-      context: ./nano-llm
-      args:
-        NANO_LLM_IMAGE: ${NANO_LLM_IMAGE:-dustynv/nano_llm:r36.2.0}
-    runtime: nvidia
-    restart: unless-stopped
-    ports:
-      - "8085:8085"
-    volumes:
-      - nano-llm-models:/data/models
-    environment:
-      VILA_MODEL: ${VILA_MODEL:-Efficient-Large-Model/VILA1.5-3b}
-      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-96}
-      HF_HOME: /data/models
-      TRANSFORMERS_CACHE: /data/models
 
   postgres:
     image: postgres:16-alpine
@@ -65,10 +52,10 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       GO2RTC_URL: http://host.docker.internal:1984
-      NANO_LLM_URL: http://nano-llm:8085
+      NANO_LLM_URL: http://${JETSON_IP}:8085
       CAMERAS: ${CAMERAS:-living_room,bedroom}
-      POLL_INTERVAL: ${POLL_INTERVAL:-30}
-      MOTION_THRESHOLD: ${MOTION_THRESHOLD:-0.02}
+      POLL_INTERVAL: ${POLL_INTERVAL:-2}
+      MOTION_THRESHOLD: ${MOTION_THRESHOLD:-0.005}
       MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-96}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -76,5 +63,4 @@ services:
         condition: service_healthy
 
 volumes:
-  nano-llm-models:
   postgres-data:
