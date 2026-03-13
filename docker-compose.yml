@@ -106,7 +106,7 @@ services:
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL}
 
   cat-observer:
-    build: ./cat-observer
+    image: ghcr.io/rajkumaar23/cat-monitor:latest
     restart: unless-stopped
     ports:
       - "${OBSERVER_PORT:-8088}:8088"
