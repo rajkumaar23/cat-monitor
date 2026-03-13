@@ -40,6 +40,8 @@ executor = ThreadPoolExecutor(max_workers=1)
 
 def _load_model():
     global model
+    import os
+    os.makedirs("/data/models/mlc/dist/models", exist_ok=True)
     from nano_llm import NanoLLM
     log.info("Loading %s ...", VILA_MODEL)
     model = NanoLLM.from_pretrained(VILA_MODEL, api="mlc", quantization="q4f16_1")
