@@ -46,7 +46,7 @@ services:
       - "8555:8555/tcp"
       - "8555:8555/udp"
     volumes:
-      - ./frigate/config.yml:/config/config.yml:ro
+      - ./frigate/config.yml:/config/config.yml
       - frigate-media:/media/frigate
       - frigate-model-cache:/config/model_cache
       - /etc/localtime:/etc/localtime:ro

@@ -14,12 +14,6 @@ detectors:
     type: tensorrt
     device: 0
 
-model:
-  path: /config/model_cache/tensorrt/yolov7-tiny-416.trt
-  input_tensor: nchw
-  input_pixel_format: rgb
-  width: 416
-  height: 416
 
 cameras:
   living_room:
