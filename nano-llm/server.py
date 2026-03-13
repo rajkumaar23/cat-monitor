@@ -9,6 +9,12 @@ import asyncio
 import base64
 import logging
 import os
+
+# nano_llm uses logging.success() — register it before importing nano_llm
+if not hasattr(logging, "success"):
+    logging.SUCCESS = 25
+    logging.addLevelName(logging.SUCCESS, "SUCCESS")
+    logging.success = lambda msg, *args, **kwargs: logging.log(logging.SUCCESS, msg, *args, **kwargs)  # noqa
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
