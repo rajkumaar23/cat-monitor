@@ -1,70 +1,69 @@
 """
-cat-observer: MQTT → Frigate snapshot → Moondream2 → PostgreSQL pipeline.
-Exposes a REST API for querying observations.
+cat-observer v2: go2rtc frame polling → VILA1.5-3b (nano-llm) → PostgreSQL
 """
 
 import asyncio
 import base64
-import json
 import logging
 import os
-import re
-import threading
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime
+from io import BytesIO
 from typing import Optional
 
 import asyncpg
 import httpx
-import paho.mqtt.client as mqtt
-from fastapi import FastAPI, HTTPException, Query
+import numpy as np
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from tenacity import retry, stop_after_attempt, wait_exponential
+from PIL import Image
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-DATABASE_URL = os.environ["DATABASE_URL"]
-MQTT_HOST = os.environ.get("MQTT_HOST", "mosquitto")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
-MQTT_USER = os.environ.get("MQTT_USER", "")
-MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
-FRIGATE_URL = os.environ.get("FRIGATE_URL", "http://frigate:5000")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "moondream")
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+DATABASE_URL     = os.environ["DATABASE_URL"]
+GO2RTC_URL       = os.environ.get("GO2RTC_URL", "http://host.docker.internal:1984")
+NANO_LLM_URL     = os.environ.get("NANO_LLM_URL", "http://nano-llm:8085")
+CAMERAS          = [c.strip() for c in os.environ.get("CAMERAS", "living_room,bedroom").split(",")]
+POLL_INTERVAL    = int(os.environ.get("POLL_INTERVAL", "30"))
+MOTION_THRESHOLD = float(os.environ.get("MOTION_THRESHOLD", "0.02"))
+LOG_LEVEL        = os.environ.get("LOG_LEVEL", "INFO").upper()
+MAX_NEW_TOKENS   = int(os.environ.get("MAX_NEW_TOKENS", "96"))
 
-TRACKED_LABELS = {"cat", "dog", "bird"}
-MIN_SCORE = 0.6
-
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 log = logging.getLogger("cat-observer")
 
-# ─── Shared state ─────────────────────────────────────────────────────────────
+PROMPT = (
+    "You are watching a home camera. In 1-2 sentences describe what you see, "
+    "focusing on cats: are there any cats, how many, what are they doing "
+    "(sleeping, playing, eating, grooming, walking, etc.), and where "
+    "(couch, floor, bed, window, food bowl, litter box, stairs, or other)? "
+    "If no cats are visible, briefly note any other activity or say 'No cats visible.'"
+)
 
-event_queue: asyncio.Queue = asyncio.Queue()
-camera_availability: dict[str, str] = {}
+# ─── State ────────────────────────────────────────────────────────────────────
+
 db_pool: Optional[asyncpg.Pool] = None
+last_frames: dict[str, bytes] = {}
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS observations (
-    id              SERIAL PRIMARY KEY,
-    timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    camera_name     TEXT NOT NULL,
-    event_id        TEXT UNIQUE NOT NULL,
-    raw_description TEXT,
-    activity_tag    TEXT,
-    location_tag    TEXT,
-    cat_count       INT,
-    snapshot_path   TEXT
+    id           SERIAL PRIMARY KEY,
+    timestamp    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    camera_name  TEXT NOT NULL,
+    description  TEXT,
+    has_cat      BOOLEAN DEFAULT FALSE,
+    cat_count    INT,
+    activity_tag TEXT,
+    location_tag TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_observations_timestamp ON observations (timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_observations_camera ON observations (camera_name);
-CREATE INDEX IF NOT EXISTS idx_observations_activity ON observations (activity_tag);
+CREATE INDEX IF NOT EXISTS idx_obs_ts  ON observations (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_obs_cam ON observations (camera_name);
+CREATE INDEX IF NOT EXISTS idx_obs_cat ON observations (has_cat);
 """
 
 
@@ -78,202 +77,165 @@ async def get_db() -> asyncpg.Pool:
     return db_pool
 
 
-# ─── Moondream2 via Ollama ─────────────────────────────────────────────────────
+# ─── Motion detection ─────────────────────────────────────────────────────────
 
-VISION_PROMPT = """Look at this image and respond with EXACTLY this format (no extra text):
-CATS: <number of cats visible, 0 if none>
-LOCATION: <one of: couch, floor, bed, window, food bowl, litter box, stairs, other>
-ACTIVITY: <one of: sleeping, resting, playing, grooming, eating, drinking, walking, jumping, other>
-DESCRIPTION: <1-2 sentences describing what you see>"""
-
-
-def parse_moondream_response(text: str) -> dict:
-    result = {"cat_count": None, "location_tag": None, "activity_tag": None, "raw_description": text}
-    for line in text.splitlines():
-        line = line.strip()
-        if m := re.match(r"CATS:\s*(\d+)", line, re.IGNORECASE):
-            result["cat_count"] = int(m.group(1))
-        elif m := re.match(r"LOCATION:\s*(.+)", line, re.IGNORECASE):
-            result["location_tag"] = m.group(1).strip().lower()
-        elif m := re.match(r"ACTIVITY:\s*(.+)", line, re.IGNORECASE):
-            result["activity_tag"] = m.group(1).strip().lower()
-        elif m := re.match(r"DESCRIPTION:\s*(.+)", line, re.IGNORECASE):
-            result["raw_description"] = m.group(1).strip()
-    return result
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-async def analyze_with_moondream(client: httpx.AsyncClient, image_bytes: bytes) -> dict:
-    b64 = base64.b64encode(image_bytes).decode()
-    payload = {
-        "model": VISION_MODEL,
-        "prompt": VISION_PROMPT,
-        "images": [b64],
-        "stream": False,
-        "options": {"temperature": 0.1},
-    }
-    resp = await client.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=60)
-    resp.raise_for_status()
-    text = resp.json().get("response", "")
-    log.debug("Moondream raw response: %s", text)
-    return parse_moondream_response(text)
-
-
-# ─── Frigate snapshot fetch ────────────────────────────────────────────────────
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
-async def fetch_snapshot(client: httpx.AsyncClient, event_id: str) -> bytes:
-    url = f"{FRIGATE_URL}/api/events/{event_id}/snapshot.jpg"
-    params = {"crop": "0", "quality": "85"}
-    resp = await client.get(url, params=params, timeout=15)
-    resp.raise_for_status()
-    return resp.content
-
-
-# ─── Event processing worker ──────────────────────────────────────────────────
-
-async def event_worker():
-    log.info("Event worker started")
-    async with httpx.AsyncClient() as client:
-        while True:
-            event = await event_queue.get()
-            try:
-                await process_event(client, event)
-            except Exception as e:
-                log.error("Failed to process event %s: %s", event.get("id"), e)
-            finally:
-                event_queue.task_done()
-
-
-async def process_event(client: httpx.AsyncClient, event: dict):
-    event_id = event["id"]
-    camera_name = event.get("camera", "unknown")
-    label = event.get("label", "unknown")
-    score = event.get("score", 0.0)
-
-    log.info("Processing event %s — %s on %s (score=%.2f)", event_id, label, camera_name, score)
-
-    pool = await get_db()
-
-    # Deduplicate
-    async with pool.acquire() as conn:
-        existing = await conn.fetchval(
-            "SELECT id FROM observations WHERE event_id = $1", event_id
-        )
-        if existing:
-            log.debug("Skipping duplicate event %s", event_id)
-            return
-
-    # Fetch snapshot
+def has_motion(frame_bytes: bytes, camera: str) -> bool:
+    prev = last_frames.get(camera)
+    last_frames[camera] = frame_bytes
+    if prev is None:
+        return True
     try:
-        image_bytes = await fetch_snapshot(client, event_id)
+        def to_arr(b):
+            return np.array(Image.open(BytesIO(b)).convert("L").resize((160, 90)))
+        diff = np.abs(to_arr(prev).astype(float) - to_arr(frame_bytes).astype(float)).mean() / 255.0
+        return diff > MOTION_THRESHOLD
+    except Exception:
+        return True
+
+
+# ─── go2rtc frame grab ────────────────────────────────────────────────────────
+
+async def grab_frame(client: httpx.AsyncClient, camera: str) -> Optional[bytes]:
+    try:
+        r = await client.get(
+            f"{GO2RTC_URL}/api/frame.jpeg",
+            params={"src": camera},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.content
     except Exception as e:
-        log.error("Could not fetch snapshot for %s: %s", event_id, e)
+        log.warning("Frame grab failed (%s): %s", camera, e)
+        return None
+
+
+# ─── VILA analysis ────────────────────────────────────────────────────────────
+
+async def analyze(client: httpx.AsyncClient, frame_bytes: bytes) -> Optional[str]:
+    try:
+        r = await client.post(
+            f"{NANO_LLM_URL}/analyze",
+            json={
+                "image_b64": base64.b64encode(frame_bytes).decode(),
+                "prompt": PROMPT,
+                "max_new_tokens": MAX_NEW_TOKENS,
+            },
+            timeout=90,
+        )
+        r.raise_for_status()
+        return r.json().get("response", "")
+    except Exception as e:
+        log.error("VILA analysis failed: %s", e)
+        return None
+
+
+# ─── Description parsing ──────────────────────────────────────────────────────
+
+def parse(text: str) -> dict:
+    t = text.lower()
+    has_cat = any(w in t for w in ["cat", "kitten", "feline"])
+
+    cat_count = None
+    for phrase, n in [("one cat", 1), ("1 cat", 1), ("a cat", 1),
+                      ("two cat", 2), ("2 cat", 2),
+                      ("three cat", 3), ("3 cat", 3)]:
+        if phrase in t:
+            cat_count = n
+            break
+    if has_cat and cat_count is None:
+        cat_count = 1
+
+    activity = next(
+        (a for a in ["sleeping", "resting", "playing", "grooming",
+                     "eating", "drinking", "walking", "jumping", "sitting"]
+         if a in t), None
+    )
+    location = next(
+        (loc for loc in ["couch", "sofa", "floor", "bed", "window",
+                         "food bowl", "litter box", "stairs", "chair", "table"]
+         if loc in t), None
+    )
+    if location == "sofa":
+        location = "couch"
+
+    return {"has_cat": has_cat, "cat_count": cat_count,
+            "activity_tag": activity, "location_tag": location}
+
+
+# ─── Per-camera poll ──────────────────────────────────────────────────────────
+
+async def poll_camera(client: httpx.AsyncClient, camera: str):
+    frame = await grab_frame(client, camera)
+    if frame is None:
         return
 
-    # Analyze with Moondream
-    try:
-        analysis = await analyze_with_moondream(client, image_bytes)
-    except Exception as e:
-        log.error("Moondream analysis failed for %s: %s", event_id, e)
-        analysis = {"cat_count": None, "location_tag": None, "activity_tag": None, "raw_description": None}
+    if not has_motion(frame, camera):
+        log.debug("%s: no motion, skipping", camera)
+        return
 
-    snapshot_path = f"/media/frigate/{camera_name}/{event_id}-snapshot.jpg"
+    log.info("%s: motion detected, sending to VILA", camera)
+    description = await analyze(client, frame)
+    if not description:
+        return
 
+    parsed = parse(description)
+    log.info("%s [has_cat=%s activity=%s]: %s",
+             camera, parsed["has_cat"], parsed["activity_tag"], description[:120])
+
+    pool = await get_db()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO observations
-                (camera_name, event_id, raw_description, activity_tag, location_tag, cat_count, snapshot_path)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (event_id) DO NOTHING
+                (camera_name, description, has_cat, cat_count, activity_tag, location_tag)
+            VALUES ($1, $2, $3, $4, $5, $6)
             """,
-            camera_name,
-            event_id,
-            analysis["raw_description"],
-            analysis["activity_tag"],
-            analysis["location_tag"],
-            analysis["cat_count"],
-            snapshot_path,
+            camera, description,
+            parsed["has_cat"], parsed["cat_count"],
+            parsed["activity_tag"], parsed["location_tag"],
         )
 
-    log.info(
-        "Saved observation: camera=%s activity=%s location=%s cats=%s",
-        camera_name, analysis["activity_tag"], analysis["location_tag"], analysis["cat_count"]
-    )
 
+# ─── Polling loop ─────────────────────────────────────────────────────────────
 
-# ─── MQTT client (runs in background thread) ──────────────────────────────────
+async def polling_loop():
+    log.info("Polling loop: cameras=%s interval=%ds", CAMERAS, POLL_INTERVAL)
 
-def make_mqtt_client(loop: asyncio.AbstractEventLoop) -> mqtt.Client:
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="cat-observer")
-    if MQTT_USER:
-        client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                r = await client.get(f"{NANO_LLM_URL}/health", timeout=5)
+                if r.json().get("model_loaded"):
+                    log.info("nano-llm ready, starting observation loop")
+                    break
+            except Exception:
+                pass
+            log.info("Waiting for nano-llm model to load...")
+            await asyncio.sleep(15)
 
-    def on_connect(c, userdata, flags, reason_code, properties):
-        if reason_code == 0:
-            log.info("MQTT connected")
-            c.subscribe("frigate/events")
-            c.subscribe("frigate/+/availability")
-        else:
-            log.warning("MQTT connect failed: reason_code=%s", reason_code)
-
-    def on_message(c, userdata, msg):
-        topic = msg.topic
-        try:
-            if topic == "frigate/events":
-                payload = json.loads(msg.payload)
-                evt_type = payload.get("type")
-                after = payload.get("after", {})
-                label = after.get("label", "")
-                score = after.get("top_score") or after.get("score") or 0.0
-                log.info("MQTT event type=%s label=%s score=%.2f", evt_type, label, score)
-                if evt_type in ("new", "end") and label in TRACKED_LABELS and score >= MIN_SCORE:
-                    event_data = {**after, "score": score}
-                    asyncio.run_coroutine_threadsafe(event_queue.put(event_data), loop)
-            elif "/availability" in topic:
-                camera = topic.split("/")[1]
-                status = msg.payload.decode()
-                camera_availability[camera] = status
-                log.info("Camera %s is %s", camera, status)
-        except Exception as e:
-            log.error("MQTT message error on %s: %s", topic, e)
-
-    def on_disconnect(c, userdata, disconnect_flags, reason_code, properties):
-        log.warning("MQTT disconnected (reason=%s), will auto-reconnect", reason_code)
-
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.on_disconnect = on_disconnect
-    return client
-
-
-def start_mqtt(loop: asyncio.AbstractEventLoop):
-    client = make_mqtt_client(loop)
-    client.connect_async(MQTT_HOST, MQTT_PORT)
-    client.loop_start()
-    log.info("MQTT loop started (host=%s port=%s)", MQTT_HOST, MQTT_PORT)
-    return client
+    async with httpx.AsyncClient() as client:
+        while True:
+            await asyncio.gather(
+                *[poll_camera(client, cam) for cam in CAMERAS],
+                return_exceptions=True,
+            )
+            await asyncio.sleep(POLL_INTERVAL)
 
 
 # ─── FastAPI app ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    loop = asyncio.get_running_loop()
     await get_db()
-    mqtt_client = start_mqtt(loop)
-    worker_task = asyncio.create_task(event_worker())
+    task = asyncio.create_task(polling_loop())
     log.info("cat-observer started")
     yield
-    worker_task.cancel()
-    mqtt_client.loop_stop()
+    task.cancel()
     if db_pool:
         await db_pool.close()
 
 
 app = FastAPI(title="cat-observer", lifespan=lifespan)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -291,12 +253,12 @@ async def health():
         db_status = "connected"
     except Exception as e:
         db_status = f"error: {e}"
-
     return {
         "status": "ok",
         "db": db_status,
-        "cameras": camera_availability,
-        "queue_depth": event_queue.qsize(),
+        "cameras": CAMERAS,
+        "poll_interval_seconds": POLL_INTERVAL,
+        "nano_llm_url": NANO_LLM_URL,
     }
 
 
@@ -305,35 +267,27 @@ async def list_observations(
     limit: int = Query(20, ge=1, le=200),
     camera: Optional[str] = None,
     activity: Optional[str] = None,
+    has_cat: Optional[bool] = None,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
 ):
     pool = await get_db()
-    filters = ["1=1"]
-    args = []
-    i = 1
-    if camera:
-        filters.append(f"camera_name = ${i}"); args.append(camera); i += 1
-    if activity:
-        filters.append(f"activity_tag = ${i}"); args.append(activity); i += 1
+    filters, args, i = ["1=1"], [], 1
+    for col, val in [("camera_name", camera), ("activity_tag", activity), ("has_cat", has_cat)]:
+        if val is not None:
+            filters.append(f"{col} = ${i}"); args.append(val); i += 1
     if since:
         filters.append(f"timestamp >= ${i}"); args.append(since); i += 1
     if until:
         filters.append(f"timestamp <= ${i}"); args.append(until); i += 1
-
-    where = " AND ".join(filters)
-    args.append(limit); i += 1
+    args.append(limit)
     sql = f"""
-        SELECT id, timestamp, camera_name, event_id, raw_description,
-               activity_tag, location_tag, cat_count
-        FROM observations
-        WHERE {where}
-        ORDER BY timestamp DESC
-        LIMIT ${i - 1}
+        SELECT id, timestamp, camera_name, description, has_cat, cat_count, activity_tag, location_tag
+        FROM observations WHERE {" AND ".join(filters)}
+        ORDER BY timestamp DESC LIMIT ${i}
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *args)
-
     return [dict(r) for r in rows]
 
 
@@ -341,7 +295,7 @@ async def list_observations(
 async def observations_today():
     today = date.today().isoformat()
     return await list_observations(
-        limit=100,
+        limit=200,
         since=datetime.fromisoformat(f"{today}T00:00:00+00:00"),
     )
 
@@ -353,45 +307,36 @@ async def summary(
 ):
     target = date_str or date.today().isoformat()
     pool = await get_db()
-
-    base_filter = "timestamp::date = $1"
-    args: list = [target]
+    args = [target]
+    cam_filter = ""
     if camera:
-        base_filter += " AND camera_name = $2"
+        cam_filter = " AND camera_name = $2"
         args.append(camera)
 
     async with pool.acquire() as conn:
-        total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM observations WHERE {base_filter}", *args
-        )
-        by_activity = await conn.fetch(
-            f"""
-            SELECT activity_tag, COUNT(*) as count
-            FROM observations WHERE {base_filter}
-            GROUP BY activity_tag ORDER BY count DESC
-            """, *args
-        )
-        by_camera = await conn.fetch(
-            f"""
-            SELECT camera_name, COUNT(*) as count
-            FROM observations WHERE {base_filter}
-            GROUP BY camera_name ORDER BY count DESC
-            """, *args
-        )
-        timeline = await conn.fetch(
-            f"""
-            SELECT timestamp, camera_name, activity_tag, location_tag,
-                   cat_count, raw_description
-            FROM observations WHERE {base_filter}
-            ORDER BY timestamp ASC
-            """, *args
-        )
+        total     = await conn.fetchval(
+            f"SELECT COUNT(*) FROM observations WHERE timestamp::date=$1{cam_filter}", *args)
+        cat_total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM observations WHERE timestamp::date=$1 AND has_cat=TRUE{cam_filter}", *args)
+        by_act    = await conn.fetch(f"""
+            SELECT activity_tag, COUNT(*) AS count FROM observations
+            WHERE timestamp::date=$1 AND has_cat=TRUE{cam_filter}
+            GROUP BY activity_tag ORDER BY count DESC""", *args)
+        by_cam    = await conn.fetch(f"""
+            SELECT camera_name, COUNT(*) AS count FROM observations
+            WHERE timestamp::date=$1{cam_filter}
+            GROUP BY camera_name ORDER BY count DESC""", *args)
+        timeline  = await conn.fetch(f"""
+            SELECT timestamp, camera_name, description, has_cat, activity_tag, location_tag
+            FROM observations WHERE timestamp::date=$1{cam_filter}
+            ORDER BY timestamp ASC""", *args)
 
     return {
         "date": target,
         "camera": camera,
-        "total_events": total,
-        "by_activity": [dict(r) for r in by_activity],
-        "by_camera": [dict(r) for r in by_camera],
+        "total_observations": total,
+        "cat_observations": cat_total,
+        "by_activity": [dict(r) for r in by_act],
+        "by_camera": [dict(r) for r in by_cam],
         "timeline": [dict(r) for r in timeline],
     }

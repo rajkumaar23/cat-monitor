@@ -1,27 +1,38 @@
 # Cat Monitor
 
-Self-hosted cat behavior monitoring system using Kasa EC70 cameras, Frigate NVR, Moondream2 vision AI, and OpenWebUI chat.
+Self-hosted cat behavior monitoring using Kasa EC70 cameras, VILA1.5-3b vision AI on Jetson, and OpenWebUI chat.
 
 ```
-Kasa EC70 (cam1)  ──┐
-                     ├──► go2rtc ──► Frigate ──► MQTT ──► cat-observer
-Kasa EC70 (cam2)  ──┘                    │                     │
-                                   snapshot API      Ollama/Moondream2 (external)
-                                                               │
-                                                         PostgreSQL
-                                                               │
-                                                  OpenWebUI (external) + cat tool
+Kasa EC70 cameras
+      │
+   go2rtc (:1984) ── RTSP proxy + HTTP snapshot API
+      │
+  cat-observer ──► nano-llm / VILA1.5-3b (:8085)
+      │                  GPU inference on Jetson Orin Nano
+  PostgreSQL
+      │
+  OpenWebUI (external) + cat tool
 ```
 
-**Hardware:** Jetson Orin Nano 8GB (TensorRT detection). CPU fallback available.
+**Hardware:** Jetson Orin Nano 8GB. VILA1.5-3b runs fully on-device via nano_llm + MLC.
 
-**External dependencies (not managed by this stack):**
-- Ollama — already running on the Jetson
-- OpenWebUI — already running on a separate host
+**External (not in this stack):** Ollama, OpenWebUI — already running on separate hosts.
 
 ---
 
-## First-time setup
+## How it works
+
+1. **go2rtc** proxies Kasa EC70 RTSP streams, exposing `/api/frame.jpeg?src=<camera>`
+2. **cat-observer** polls each camera every `POLL_INTERVAL` seconds (default: 30s)
+3. Simple pixel-diff motion detection skips unchanged frames
+4. On motion, the JPEG frame is sent to **nano-llm** running VILA1.5-3b
+5. VILA describes the scene in natural language, focusing on cats
+6. Description + parsed metadata (has_cat, activity, location) stored in **PostgreSQL**
+7. REST API and OpenWebUI tool let you query what happened
+
+---
+
+## Setup
 
 ### 1. Clone and configure
 
@@ -31,121 +42,99 @@ cd cat-monitor
 cp .env.example .env
 ```
 
-Edit `.env` and fill in all values:
-
+Edit `.env`:
 - `CAM1_USER` / `CAM2_USER` — URL-percent-encode your email (`@` → `%40`)
-- `CAM1_PASS` / `CAM2_PASS` — base64-encode your password:
-  ```bash
-  echo -n 'yourpassword' | base64
-  ```
-- `OLLAMA_URL` — point to your existing Ollama instance, e.g. `http://192.168.1.x:11434`
+- `CAM1_PASS` / `CAM2_PASS` — base64-encode your password: `echo -n 'pass' | base64`
+- `NANO_LLM_IMAGE` — match your JetPack version (see below)
 
-### 2. Pull moondream into your existing Ollama (if not already)
+### 2. Check your JetPack version
 
 ```bash
-ollama pull moondream
+sudo apt show nvidia-jetpack 2>/dev/null | grep Version
 ```
 
-### 3. Generate Mosquitto password file (one-time)
+| JetPack | L4T | `NANO_LLM_IMAGE` |
+|---|---|---|
+| 6.x | r36.x | `dustynv/nano_llm:r36.2.0` |
+| 5.1 | r35.x | `dustynv/nano_llm:r35.4.1` |
 
-```bash
-source .env
-docker run --rm \
-  -v "$(pwd)/mosquitto:/mosquitto/config" \
-  eclipse-mosquitto:2.0 \
-  sh -c "mosquitto_passwd -c -b /mosquitto/config/passwd \"$MQTT_USER\" \"$MQTT_PASSWORD\" \
-         && chmod 644 /mosquitto/config/passwd"
-```
-
-### 4. Confirm NVIDIA container toolkit
-
-```bash
-sudo apt show nvidia-jetpack
-nvidia-container-cli info
-```
-
-### 5. Start the stack
+### 3. Start the stack
 
 ```bash
 docker compose up -d
 ```
 
-### 6. Wait for TensorRT compilation (~10 min, first run only)
+### 4. Wait for VILA to load (~3–5 min first run, model downloads automatically)
 
 ```bash
-docker logs frigate -f
-# Wait for: "Frigate is running"
+docker logs cat-monitor-nano-llm-1 -f
+# Wait for: "Model ready."
 ```
 
-The `frigate-model-cache` volume persists the compiled TRT model so subsequent restarts are fast.
+The model is cached in the `nano-llm-models` volume — subsequent starts are fast.
 
-### 7. Add the cat tool to OpenWebUI
+### 5. Verify
 
-1. Open your existing OpenWebUI instance
-2. Go to **Settings → Tools → Add Tool**
-3. Paste the contents of `openwebui-tools/cat_query_tool.py`
-4. Update `CAT_OBSERVER_URL` at the top of the file to point to the Jetson IP, e.g. `http://192.168.1.x:8088`
-5. Save
+```bash
+curl http://<jetson-ip>:8088/health
+curl http://<jetson-ip>:8088/observations
+```
 
-In chat, click the **tools icon** to enable the tool, then ask:
-> "What have my cats been doing today?"
+### 6. Add the OpenWebUI tool
+
+1. Open your OpenWebUI instance
+2. **Settings → Tools → Add Tool** → paste `openwebui-tools/cat_query_tool.py`
+3. Update `CAT_OBSERVER_URL` at the top to `http://<jetson-ip>:8088`
+4. Enable the tool in chat and ask: *"What have my cats been doing today?"*
 
 ---
 
 ## Services & ports
 
-| Service | Port | URL |
+| Service | Port | Purpose |
 |---|---|---|
-| Frigate UI | 5000 | `http://<jetson-ip>:5000` |
-| cat-observer API | 8088 | `http://<jetson-ip>:8088` |
-| MQTT | 1883 | — |
+| go2rtc UI + API | 1984 | Live stream viewer, snapshot API |
+| nano-llm API | 8085 | VILA1.5-3b HTTP inference |
+| cat-observer API | 8088 | Observations REST API |
 
 ---
 
-## Verification
+## Tuning
+
+| Variable | Default | Description |
+|---|---|---|
+| `POLL_INTERVAL` | `30` | Seconds between frame grabs per camera |
+| `MOTION_THRESHOLD` | `0.02` | Pixel-diff sensitivity (lower = more sensitive) |
+| `MAX_NEW_TOKENS` | `96` | Max tokens in VILA response |
+| `CAMERAS` | `living_room,bedroom` | Comma-separated go2rtc stream names |
+
+---
+
+## API
 
 ```bash
-# System health
-curl http://<jetson-ip>:8088/health
+# Health check
+curl http://<ip>:8088/health
 
-# Recent observations
-curl http://<jetson-ip>:8088/observations?limit=5
+# Recent cat observations
+curl "http://<ip>:8088/observations?has_cat=true&limit=10"
 
-# Today's activity summary
-curl http://<jetson-ip>:8088/summary
-```
+# Today's summary
+curl http://<ip>:8088/summary
 
-Expected health response:
-```json
-{"status":"ok","db":"connected","cameras":{"living_room":"online","bedroom":"online"},"queue_depth":0}
-```
-
----
-
-## CPU fallback (non-Jetson)
-
-Remove `runtime: nvidia` from the `frigate` service in `docker-compose.yml`, and change the detector in `frigate/config.yml`:
-
-```yaml
-detectors:
-  cpu:
-    type: cpu
-    num_threads: 3
+# Filter by camera and activity
+curl "http://<ip>:8088/observations?camera=living_room&activity=sleeping"
 ```
 
 ---
 
-## Camera logical names
+## Camera names
 
-| Stream name | go2rtc key | Frigate camera | Location |
-|---|---|---|---|
-| Camera 1 | `living_room` | `living_room` | Living room |
-| Camera 2 | `bedroom` | `bedroom` | Bedroom |
-
-Change these in `go2rtc/config.yaml.tpl` and `frigate/config.yml` to match your layout.
+Stream names in `go2rtc/config.yaml.tpl` must match the `CAMERAS` env var.
+Defaults: `living_room` (cam1), `bedroom` (cam2).
 
 ---
 
 ## Secrets
 
-All credentials live in `.env` (gitignored). The committed `.env.example` contains only placeholder values. The Mosquitto `passwd` file is also gitignored and generated locally.
+All credentials in `.env` (gitignored). `.env.example` has placeholders only.

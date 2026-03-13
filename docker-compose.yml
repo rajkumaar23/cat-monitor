@@ -23,41 +23,24 @@ services:
       CAM2_USER: ${CAM2_USER}
       CAM2_PASS: ${CAM2_PASS}
 
-  mosquitto:
-    image: eclipse-mosquitto:2.0
+  nano-llm:
+    image: ${NANO_LLM_IMAGE:-dustynv/nano_llm:r36.2.0}
+    runtime: nvidia
     restart: unless-stopped
     ports:
-      - "1883:1883"
+      - "8085:8085"
     volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
-      - mosquitto-data:/mosquitto/data
-      - mosquitto-log:/mosquitto/log
-
-  frigate:
-    image: ghcr.io/blakeblackshear/frigate:stable
-    restart: unless-stopped
-    privileged: true
-    shm_size: "256mb"
-    ports:
-      - "5000:5000"
-      - "8534:8554"
-      - "8535:8555/tcp"
-      - "8535:8555/udp"
-    volumes:
-      - ./frigate/config.yml:/config/config.yml
-      - frigate-media:/media/frigate
-      - frigate-model-cache:/config/model_cache
-      - /etc/localtime:/etc/localtime:ro
+      - ./nano-llm/server.py:/app/server.py
+      - nano-llm-models:/data/models
+    working_dir: /app
+    command: >
+      bash -c "pip3 install --quiet --no-cache-dir 'fastapi>=0.115' 'uvicorn[standard]' pillow &&
+               python3 /app/server.py"
     environment:
-      FRIGATE_RTSP_PASSWORD: ${FRIGATE_RTSP_PASSWORD}
-      FRIGATE_MQTT_USER: ${FRIGATE_MQTT_USER}
-      FRIGATE_MQTT_PASSWORD: ${FRIGATE_MQTT_PASSWORD}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      - mosquitto
-      - go2rtc
+      VILA_MODEL: ${VILA_MODEL:-Efficient-Large-Model/VILA1.5-3b}
+      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-96}
+      HF_HOME: /data/models
+      TRANSFORMERS_CACHE: /data/models
 
   postgres:
     image: postgres:16-alpine
@@ -79,25 +62,21 @@ services:
     restart: unless-stopped
     ports:
       - "${OBSERVER_PORT:-8088}:8088"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      MQTT_HOST: mosquitto
-      MQTT_PORT: 1883
-      MQTT_USER: ${MQTT_USER}
-      MQTT_PASSWORD: ${MQTT_PASSWORD}
-      FRIGATE_URL: http://frigate:5000
-      OLLAMA_URL: ${OLLAMA_URL}
-      OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-moondream}
+      GO2RTC_URL: http://host.docker.internal:1984
+      NANO_LLM_URL: http://nano-llm:8085
+      CAMERAS: ${CAMERAS:-living_room,bedroom}
+      POLL_INTERVAL: ${POLL_INTERVAL:-30}
+      MOTION_THRESHOLD: ${MOTION_THRESHOLD:-0.02}
+      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-96}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
-      frigate:
-        condition: service_started
 
 volumes:
-  mosquitto-data:
-  mosquitto-log:
-  frigate-media:
-  frigate-model-cache:
+  nano-llm-models:
   postgres-data:
