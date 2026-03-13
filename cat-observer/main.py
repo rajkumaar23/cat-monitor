@@ -37,8 +37,9 @@ log = logging.getLogger("cat-observer")
 
 PROMPT = (
     "Describe this security camera image in 1-2 sentences. "
-    "State what subjects are present (cats, people, or nothing), "
-    "what they are doing, and where they are in the room. "
+    "There are 2 cats in this home — note how many are visible (0, 1, or 2), "
+    "what each is doing, and where they are in the room. "
+    "Also note any people or unusual activity. "
     "Be direct and factual. Do not ask questions or list topics."
 )
 

@@ -58,9 +58,10 @@ def _infer(image: Image.Image, prompt: str, max_tokens: int) -> str:
     from nano_llm import ChatHistory
     chat = ChatHistory(model)
     chat.append(role="user", msg=prompt, image=image)
+    chat.append(role="assistant", msg="In this image,")  # prime to prevent list generation
     embedding, _ = chat.embed_chat()
     response = model.generate(embedding, streaming=False, max_new_tokens=max_tokens)
-    return (response or "").strip()
+    return ("In this image," + (response or "")).strip()
 
 
 @app.on_event("startup")
