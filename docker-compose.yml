@@ -6,8 +6,9 @@ services:
 
   go2rtc:
     image: alexxit/go2rtc:latest
-    network_mode: host
     restart: unless-stopped
+    ports:
+      - "1984:1984"
     volumes:
       - ./go2rtc:/config
     entrypoint:
@@ -47,11 +48,9 @@ services:
     restart: unless-stopped
     ports:
       - "${OBSERVER_PORT:-8088}:8088"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      GO2RTC_URL: http://host.docker.internal:1984
+      GO2RTC_URL: http://go2rtc:1984
       NANO_LLM_URL: http://${JETSON_IP}:8085
       CAMERAS: ${CAMERAS:-living_room,bedroom}
       POLL_INTERVAL: ${POLL_INTERVAL:-2}
