@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
     ports:
       - "1984:1984"
+    networks:
+      - cat-net
     volumes:
       - ./go2rtc:/config
     entrypoint:
@@ -31,6 +33,8 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    networks:
+      - cat-net
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -48,6 +52,8 @@ services:
     restart: unless-stopped
     ports:
       - "${OBSERVER_PORT:-8088}:8088"
+    networks:
+      - cat-net
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       GO2RTC_URL: http://go2rtc:1984
@@ -60,6 +66,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+networks:
+  cat-net:
 
 volumes:
   postgres-data:
